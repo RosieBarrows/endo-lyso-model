@@ -25,7 +25,7 @@ import matplotlib.pyplot as plt
 from scipy.integrate import solve_ivp
 from scipy.optimize import least_squares
 
-OUTDIR = "mm_sweep_v04"
+OUTDIR = os.path.join("figures", "mm_sweep_v04")   # all generated figures live under figures/ (gitignored)
 os.makedirs(OUTDIR, exist_ok=True)
 
 # ---------------------------------------------------------------------------
@@ -309,7 +309,7 @@ for K_m in KM_VALUES:
     peakR = results[(K_m, 125.0)]['peak_cly']
     print(f"   K_m={K_m:>4.0f}: peak_Cly RPTEC={peakR:9.1f}, NRK={peakN:8.1f}, ratio={peakR / peakN:.2f}")
 
-print("\nFigures written to ./mm_sweep_v04/:")
+print(f"\nFigures written to ./{OUTDIR}/:")
 for f in ("v04_output1_fit_preservation.png", "v04_output2_lysosomal_load.png",
           "v04_output3_threshold_crossing.png", "v04_output4_peak_cly_vs_dose.png"):
     print(f"  {f}")

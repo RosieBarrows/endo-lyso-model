@@ -32,12 +32,17 @@ Per user direction: the final time point is evaluated at t = 48 h (not 47.46 h).
 # ---------------------------------------------------------------------------
 # 1. Imports
 # ---------------------------------------------------------------------------
+import os
 import numpy as np
 import matplotlib.pyplot as plt
 from scipy.integrate import solve_ivp
 from scipy.optimize import least_squares
 
 np.set_printoptions(suppress=True)
+
+# All generated figures go here (gitignored).
+FIGDIR = "figures"
+os.makedirs(FIGDIR, exist_ok=True)
 
 # ---------------------------------------------------------------------------
 # 2. Constants and fixed parameters
@@ -288,7 +293,7 @@ axR.set_xlabel('time (h)'); axR.set_ylabel('intracellular conc (nM)')
 axR.set_xlim(0, 50); axR.set_ylim(*ylim); axR.legend(fontsize=8, loc='upper left')
 fig1.suptitle('Output 1: Time-course fits (v0.4) - Jarzina (2022) Fig 6A', fontsize=13)
 fig1.tight_layout(rect=[0, 0, 1, 0.96])
-fig1.savefig('v04_output1_timecourse.png', dpi=150)
+fig1.savefig(os.path.join(FIGDIR, 'v04_output1_timecourse.png'), dpi=150)
 
 # ---- Output 2: compartment breakdown (RPTEC only) ----
 _, _, compsR = simulate(p_RPTEC, V_CELL_RPTEC, t_eval_h=t_dense, return_compartments=True)
@@ -301,7 +306,7 @@ ax2.set_title('Output 2: Compartmental breakdown (RPTEC/TERT1 + PB)')
 ax2.set_xlabel('time (h)'); ax2.set_ylabel('intracellular conc (nM)')
 ax2.set_xlim(0, 50); ax2.legend(fontsize=9, loc='upper left')
 fig2.tight_layout()
-fig2.savefig('v04_output2_compartments.png', dpi=150)
+fig2.savefig(os.path.join(FIGDIR, 'v04_output2_compartments.png'), dpi=150)
 
 # ---- Output 4: stress-test (4 subplots, one per fixed param) ----
 fig4, axes4 = plt.subplots(2, 2, figsize=(13, 9))
@@ -327,7 +332,7 @@ for ax, (pname, rows) in zip(axes4.ravel(), stress_results.items()):
     ax.legend(h1 + h2, l1 + l2, fontsize=7, loc='best')
 fig4.suptitle('Output 4: Stress-test of fixed trafficking parameters (v0.4, re-centered)', fontsize=13)
 fig4.tight_layout(rect=[0, 0, 1, 0.96])
-fig4.savefig('v04_output4_stresstest.png', dpi=150)
+fig4.savefig(os.path.join(FIGDIR, 'v04_output4_stresstest.png'), dpi=150)
 
 # ---- Output 5: lysosomal load (RPTEC) with thresholds ----
 C_ly = compsR['C_ly']
@@ -354,7 +359,7 @@ ax5.set_xlim(0, 50)
 ax5.set_title('Output 5: Lysosomal load trajectory (RPTEC/TERT1 + PB)')
 ax5.legend(loc='lower right')
 fig5.tight_layout()
-fig5.savefig('v04_output5_lysosomal_load.png', dpi=150)
+fig5.savefig(os.path.join(FIGDIR, 'v04_output5_lysosomal_load.png'), dpi=150)
 plt.close('all')
 
 
@@ -416,6 +421,6 @@ for pname, rrows in stress_results.items():
     print(f"  Varying {pname} 100x -> k_uptake_RPTEC {max(ku)/min(ku):.2f}x, "
           f"k_deg {max(kd)/min(kd):.2f}x, ratio {min(rr):.2f}-{max(rr):.2f}")
 
-print("\nFigures written: v04_output1_timecourse.png, v04_output2_compartments.png,")
+print(f"\nFigures written to ./{FIGDIR}/: v04_output1_timecourse.png, v04_output2_compartments.png,")
 print("                 v04_output4_stresstest.png, v04_output5_lysosomal_load.png")
 print("=" * 72)

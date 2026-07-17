@@ -52,10 +52,11 @@ V_CELL = {
 # 2.635e-07 -- 3.597e-07 (see K_UPTAKE_RPTEC_BAND).
 # ---------------------------------------------------------------------------
 FITTED = {
-    "k_uptake_RPTEC": 2.6350e-07,  # fmol/cell/min/uM  (Step 1, nominal k_rec)
-    "k_uptake_NRK":   3.3730e-08,  # fmol/cell/min/uM  (Step 2A, k_deg fixed)
-    "k_deg_PB":       2.4450e-04,  # /min  (Step 1, shared with Step 2A)
-    "k_deg_NRK_free": 1.6280e-03,  # /min  (Step 2B, NRK k_deg free -- reference only)
+    "k_uptake_RPTEC":    2.6350e-07,  # fmol/cell/min/uM  (Step 1, nominal k_rec)
+    "k_uptake_NRK":      3.3730e-08,  # fmol/cell/min/uM  (Step 2A, k_deg fixed = k_deg_PB)
+    "k_deg_PB":          2.4450e-04,  # /min  (Step 1, shared with Step 2A)
+    "k_uptake_NRK_free": 7.8950e-08,  # fmol/cell/min/uM  (Step 2B, NRK k_deg free)
+    "k_deg_NRK_free":    1.6280e-03,  # /min  (Step 2B, NRK k_deg free)
 }
 K_UPTAKE_RPTEC_BAND = (2.6350e-07, 3.5970e-07)  # k_rec 0.02 -> 0.046
 

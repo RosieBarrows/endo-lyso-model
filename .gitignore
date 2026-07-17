@@ -12,3 +12,9 @@ venv/
 
 # Claude Code local settings (keep local, not shared)
 .claude/settings.local.json
+
+# Generated figures (all scripts write under figures/)
+figures/
+
+# Write-ups (kept in Dropbox, not versioned here)
+*.docx

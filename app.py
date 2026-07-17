@@ -7,8 +7,12 @@ and the fixed trafficking rate constants, and see the effect on:
   - the lysosomal load trajectory and threshold-crossing times
   - a dose-response sweep of peak lysosomal load / threshold-crossing time
 
-Uses frozen v0.2 fitted parameters (k_uptake, k_deg) as defaults -- no live
-refitting. Run with: streamlit run app.py
+Uses frozen v0.4 fitted parameters (k_uptake, k_deg) as defaults -- no live
+refitting. v0.4 adopts the Shipman et al. (2022) proximal-tubule trafficking
+rate constants (k_mat, k_fuse) and treats k_rec as an uncertain 0.02-0.046 /min
+band (nominal 0.02). For NRK-52E, a checkbox switches between the Step 2A fit
+(k_deg fixed to the RPTEC value) and the Step 2B fit (k_deg free).
+Run with: streamlit run app.py
 """
 
 import numpy as np
@@ -17,7 +21,7 @@ import plotly.graph_objects as go
 import streamlit as st
 from plotly.subplots import make_subplots
 
-import model_core as mc
+import model_core_v04 as mc
 
 st.set_page_config(page_title="Endo-lysosomal accumulation model", layout="wide")
 
@@ -30,6 +34,7 @@ DATA_CENTRAL = {"RPTEC/TERT1": mc.RPTEC_CENTRAL, "NRK-52E": mc.NRK_CENTRAL}
 # ---------------------------------------------------------------------------
 DEFAULTS = {
     "cell_line": "RPTEC/TERT1",
+    "nrk_kdeg_free": False,
     "use_mm": True,
     "K_m": mc.KM_DEFAULT,
     "dose": 34.0,
@@ -61,6 +66,17 @@ st.sidebar.markdown("---")
 
 cell_line = st.sidebar.selectbox("Cell line", CELL_LINES, key="cell_line")
 
+if cell_line == "NRK-52E":
+    nrk_kdeg_free = st.sidebar.checkbox(
+        "NRK: use k_deg-free fit (Step 2B)", key="nrk_kdeg_free",
+        help="Default (unchecked) = Step 2A: NRK shares the RPTEC-fitted k_deg, only "
+             "k_uptake is refitted. Checked = Step 2B: both k_uptake and k_deg are "
+             "refitted for NRK, giving a ~6.7x faster lysosomal degradation "
+             "(t1/2 ~7h vs ~47h) that captures the steep washout decline.",
+    )
+else:
+    nrk_kdeg_free = False
+
 use_mm = st.sidebar.checkbox(
     "Saturating (Michaelis-Menten) uptake", key="use_mm",
     help="Uncheck to use the v0.2 linear uptake approximation "
@@ -81,28 +97,46 @@ dose = st.sidebar.slider(
 
 st.sidebar.markdown("---")
 st.sidebar.markdown("**Trafficking rate constants (/min)**")
+st.sidebar.caption(
+    "v0.4 defaults: k_mat, k_fuse from Shipman et al. (2022) OK-cell megalin model; "
+    "k_esc from Gilleron et al. (2013). Vary them to stress-test their influence."
+)
 k_mat = st.sidebar.slider("k_mat (EE -> LE maturation)", 0.004, 0.4,
-                           step=0.001, format="%.3f", key="k_mat")
+                           step=0.001, format="%.3f", key="k_mat",
+                           help="v0.4 default 0.048 (Shipman k_m,1).")
 k_rec = st.sidebar.slider("k_rec (EE -> surface recycling)", 0.002, 0.2,
-                           step=0.001, format="%.3f", key="k_rec")
-k_fuse = st.sidebar.slider("k_fuse (LE -> lysosome fusion)", 0.002, 0.2,
-                            step=0.001, format="%.3f", key="k_fuse")
+                           step=0.0005, format="%.4f", key="k_rec",
+                           help="v0.4 nominal 0.02; plausible band 0.02-0.046 "
+                                "(upper = Shipman k_DAT,f). Uncertain/swept, not hard-fixed.")
+k_fuse = st.sidebar.slider("k_fuse (LE -> lysosome fusion)", 0.001, 0.1,
+                            step=0.0002, format="%.4f", key="k_fuse",
+                            help="v0.4 default 0.0094 (Shipman k_m,2), ~2x slower than v0.2. "
+                                 "Transparent to the total-intracellular fit but sets the "
+                                 "rate of lysosomal filling.")
 k_esc = st.sidebar.slider("k_esc (LE -> cytosol escape)", 0.00002, 0.002,
-                           step=0.00002, format="%.5f", key="k_esc")
+                           step=0.00002, format="%.5f", key="k_esc",
+                           help="v0.4 default 0.0002 (Gilleron). Negligible for accumulation; "
+                                "central to the planned ON endosomal-escape/efficacy extension.")
 
 st.sidebar.markdown("---")
 t_washout = st.sidebar.slider("Washout time (h)", 6.0, 48.0, step=1.0, key="t_washout")
 sim_end = st.sidebar.slider("Simulation end (h)", t_washout + 2, 96.0, step=2.0, key="sim_end")
 
 fixed = dict(k_mat=k_mat, k_rec=k_rec, k_fuse=k_fuse, k_esc=k_esc)
-k_uptake = mc.FITTED[KUPTAKE_KEY[cell_line]]
-k_deg = mc.FITTED["k_deg_PB"]
+if cell_line == "NRK-52E" and nrk_kdeg_free:
+    k_uptake = mc.FITTED["k_uptake_NRK_free"]
+    k_deg = mc.FITTED["k_deg_NRK_free"]
+    fit_label = "Step 2B (NRK, k_deg free)"
+else:
+    k_uptake = mc.FITTED[KUPTAKE_KEY[cell_line]]
+    k_deg = mc.FITTED["k_deg_PB"]
+    fit_label = "Step 2A (NRK, k_deg fixed)" if cell_line == "NRK-52E" else "Step 1 (RPTEC)"
 V_cell = mc.V_CELL[cell_line]
 
 st.sidebar.markdown("---")
 st.sidebar.caption(
-    f"Fitted (frozen, v0.2): k_uptake_{cell_line.split('/')[0]} = {k_uptake:.3g} "
-    f"fmol/cell/min/uM, k_deg = {k_deg:.3g} /min"
+    f"Fitted (frozen, v0.4): k_uptake_{cell_line.split('/')[0]} = {k_uptake:.3g} "
+    f"fmol/cell/min/uM, k_deg = {k_deg:.3g} /min  ·  {fit_label}"
 )
 
 # ---------------------------------------------------------------------------
@@ -230,13 +264,24 @@ back to the cell surface, and a small fraction of late-endosome content
 | `k_deg` | rate drug is degraded/cleared once in the lysosome | /min |
 
 Model amounts (fmol/cell) are converted to the intracellular concentrations
-(nM) shown in the charts using each cell line's measured cell volume. The
-four trafficking rates (`k_mat`, `k_rec`, `k_fuse`, `k_esc`) are literature
-values for generic endosomal trafficking kinetics, not drug-specific — you
-can vary them in the sidebar to stress-test how much they matter.
-`k_uptake` and `k_deg` are fitted per cell line to the Jarzina data and held
-fixed here (not adjustable), so the calibration to real data is always
-preserved.
+(nM) shown in the charts using each cell line's measured cell volume. As of
+**v0.4**, the maturation and fusion rates (`k_mat`, `k_fuse`) are taken from
+Shipman et al. (2022), a proximal-tubule-specific megalin trafficking model
+in opossum kidney cells, rather than the earlier generic estimates; `k_rec`
+is treated as an uncertain 0.02–0.046 /min band (nominal 0.02); `k_esc`
+stays at the Gilleron et al. (2013) value. You can vary all four in the
+sidebar to stress-test how much they matter — note that `k_fuse` barely
+affects the *total* fitted curve but strongly shifts the *lysosomal* load
+timing. `k_uptake` and `k_deg` are fitted per cell line to the Jarzina data
+and held fixed here (not adjustable), so the calibration to real data is
+always preserved.
+
+For **NRK-52E** only, a sidebar checkbox switches between two fitted
+parameter sets: the default *Step 2A* fit (NRK shares the RPTEC-derived
+`k_deg`, only its uptake is refitted) and the *Step 2B* fit (both `k_uptake`
+and `k_deg` refitted for NRK). Step 2B gives a ~6.7× faster lysosomal
+degradation and reproduces the steep post-washout decline the shared-`k_deg`
+fit misses.
 """)
 
     st.markdown("### Why it matters")
