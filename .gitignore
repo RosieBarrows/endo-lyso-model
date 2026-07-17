@@ -1,0 +1,14 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+
+# Virtual environment (large — never commit)
+.venv/
+venv/
+
+# OS / editor
+.DS_Store
+
+# Claude Code local settings (keep local, not shared)
+.claude/settings.local.json
