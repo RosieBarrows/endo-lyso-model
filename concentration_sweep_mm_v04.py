@@ -10,10 +10,14 @@ re-derived internally from the 34 uM data (Step 1 / Step 2A) under these rates.
 
 Replaces the linear uptake term (k_uptake * C_ext) with the full saturating form:
 
-    uptake = V_max * C_ext / (K_m + C_ext),   V_max = k_uptake_fitted * K_m
+    uptake = V_max * C_ext / (K_m + C_ext),   V_max = k_uptake_fitted * (K_m + CAL_CONC)
 
-so that at C_ext << K_m the calibration is preserved, and at C_ext >> K_m uptake
-saturates at V_max.
+The (K_m + CAL_CONC) back-calculation anchors the saturating curve to the fitted
+linear uptake AT the 34 uM calibration dose, so the fit is preserved at 34 uM for
+every K_m (not only in the C_ext << K_m limit); above the calibration dose K_m
+bends the dose-response and uptake saturates at V_max. (An earlier V_max =
+k_uptake * K_m pinned the C_ext -> 0 tangent and undershot the 34 uM data by
+K_m/(K_m + 34) -- ~15% at K_m = 200. See model_core_v04.v_max.)
 
 Sweep K_m in {50, 100, 200, 500} uM over doses {34, 125, 250, 500, 1000, 2000} uM,
 24h exposure + 24h washout. Figures -> ./mm_sweep_v04/.
@@ -154,7 +158,7 @@ for c_lbl, ax, ydata, yerr_lo, yerr_hi, kuptake, V in [
         ("RPTEC/TERT1", axL, RPTEC_C, RPTEC_LO, RPTEC_HI, k_uptake_RPTEC, V_CELL_RPTEC),
         ("NRK-52E",     axR, NRK_C,   None,     None,     k_uptake_NRK,   V_CELL_NRK)]:
     for K_m, col in zip(KM_VALUES, km_colors):
-        p = make_params(kuptake * K_m, K_m, k_deg_PB)
+        p = make_params(kuptake * (K_m + CAL_CONC), K_m, k_deg_PB)
         _, tot = simulate(p, V, CAL_CONC, t_grid)
         ax.plot(t_grid, tot, color=col, lw=2, label=f"K_m={K_m:.0f} uM")
     if yerr_lo is not None:
@@ -177,7 +181,7 @@ results = {}   # (K_m, dose) -> dict
 global_cly_max = 0.0
 dose_colors = plt.cm.viridis(np.linspace(0, 0.9, len(DOSES)))
 for K_m in KM_VALUES:
-    V_max_R = k_uptake_RPTEC * K_m
+    V_max_R = k_uptake_RPTEC * (K_m + CAL_CONC)
     for dose in DOSES:
         p = make_params(V_max_R, K_m, k_deg_PB)
         _, tot, comps = simulate(p, V_CELL_RPTEC, dose, t_grid, return_compartments=True)
@@ -201,7 +205,7 @@ for ax, K_m in zip(axes2.ravel(), KM_VALUES):
         ax.axhline(thr, ls='--', color='grey', alpha=0.6)
     ax.axvline(24, ls='--', color='grey', alpha=0.5)
     ax.set_ylim(0, global_cly_max * 1.05)
-    ax.set_title(f"K_m = {K_m:.0f} uM   (V_max_RPTEC = {k_uptake_RPTEC * K_m:.3g} fmol/cell/min)")
+    ax.set_title(f"K_m = {K_m:.0f} uM   (V_max_RPTEC = {k_uptake_RPTEC * (K_m + CAL_CONC):.3g} fmol/cell/min)")
     ax.set_xlabel("time (h)"); ax.set_ylabel("lysosomal C_ly (nM)")
     ax.set_xlim(0, 50); ax.legend(fontsize=7, loc='upper right')
 fig2.suptitle("Output 2: RPTEC/TERT1 lysosomal load vs time (v0.4, per K_m, all doses)",
@@ -303,7 +307,7 @@ print(f"   1000nM range across K_m: {min(t1_125):.2f}-{max(t1_125):.2f} h")
 # ---- Flag 4: NRK-52E saturation + cell-line ratio at 125 uM ----
 print("\n4. NRK-52E at 125 uM and cell-line peak-C_ly ratio (RPTEC/NRK):")
 for K_m in KM_VALUES:
-    pN = make_params(k_uptake_NRK * K_m, K_m, k_deg_PB)
+    pN = make_params(k_uptake_NRK * (K_m + CAL_CONC), K_m, k_deg_PB)
     _, _, cN = simulate(pN, V_CELL_NRK, 125.0, t_grid, return_compartments=True)
     peakN = cN['C_ly'].max()
     peakR = results[(K_m, 125.0)]['peak_cly']

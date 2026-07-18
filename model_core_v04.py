@@ -75,19 +75,76 @@ RPTEC_UPPER   = np.array([0.0, 883.0, 1909.0, 5156.0, 4065.0])
 NRK_CENTRAL   = np.array([0.0, 299.0, 662.0, 831.0, 104.0])
 
 
-def v_max(k_uptake, K_m):
-    """Back-calculate V_max so that at C_ext << K_m, uptake ~= k_uptake * C_ext."""
-    return k_uptake * K_m
+def v_max(k_uptake, K_m, c_cal=CAL_CONC):
+    """
+    Back-calculate V_max so that saturating uptake reproduces the fitted linear
+    uptake AT THE CALIBRATION CONCENTRATION c_cal, for any K_m.
+
+    k_uptake is fitted in the linear regime (uptake = k_uptake * C_ext) against the
+    single-dose (34 uM) Jarzina data, so the calibration is anchored at c_cal, not at
+    C_ext -> 0. Setting V_max = k_uptake * (K_m + c_cal) makes
+        uptake(c_cal) = V_max * c_cal / (K_m + c_cal) = k_uptake * c_cal
+    hold exactly for every K_m. The earlier V_max = k_uptake * K_m instead pinned the
+    C_ext -> 0 tangent, which undershot the calibration by K_m/(K_m + c_cal) (~15% at
+    K_m = 200 uM) because 34 uM is not << K_m. K_m still bends the dose-response above
+    c_cal; only the anchor point moved from 0 to the calibration dose.
+    """
+    return k_uptake * (K_m + c_cal)
 
 
 def odes(t, y, p, c_ext):
-    """RHS of the 3-compartment system. y = [C_ee, C_le, C_ly] in fmol/cell."""
+    """
+    RHS of the 3-compartment system. y = [C_ee, C_le, C_ly] in fmol/cell.
+
+    t is in MINUTES (the integration time base, matching the /min rate constants).
+    c_ext is either a scalar (uM) or a callable taking time in HOURS -> uM, so that
+    time-varying exposures (e.g. a PBPK-derived C_ext(t)) can drive the model.
+    """
     C_ee, C_le, C_ly = y
-    uptake = p["V_max"] * c_ext / (p["K_m"] + c_ext)
+    c = c_ext(t / 60.0) if callable(c_ext) else c_ext
+    uptake = p["V_max"] * c / (p["K_m"] + c)
     dC_ee = uptake            - (p["k_mat"] + p["k_rec"]) * C_ee
     dC_le = p["k_mat"] * C_ee - (p["k_fuse"] + p["k_esc"]) * C_le
     dC_ly = p["k_fuse"] * C_le - p["k_deg"] * C_ly
     return [dC_ee, dC_le, dC_ly]
+
+
+def _simulate_segments(p, V_cell, segments, t_eval_h):
+    """
+    Integrate the system piecewise over `segments`, carrying state across boundaries.
+
+    segments: list of (t0_h, t1_h, c_ext), where c_ext is a scalar (uM) or a callable
+    of time-in-hours. Splitting at segment edges is what keeps the stiff solver from
+    stepping straight over a discontinuity in the exposure (e.g. a washout or a
+    dosing event) -- BDF will happily miss a jump it never evaluates at.
+
+    Returns (t_eval_h, total_nM, compartments_nM).
+    """
+    t_eval_h = np.atleast_1d(np.asarray(t_eval_h, dtype=float))
+    t_eval_min = t_eval_h * 60.0
+    Y = np.zeros((3, t_eval_min.size))
+    y0 = np.array([0.0, 0.0, 0.0])
+    n_seg = len(segments)
+
+    for i, (t0_h, t1_h, c_ext) in enumerate(segments):
+        t0, t1 = t0_h * 60.0, t1_h * 60.0
+        if t1 <= t0:
+            continue
+        sol = solve_ivp(odes, (t0, t1), y0, args=(p, c_ext), method="BDF",
+                        dense_output=True, rtol=1e-8, atol=1e-12)
+        # First segment owns its left edge; later segments take (t0, t1]. The final
+        # segment has no upper bound, so it also covers any t_eval at sim_end.
+        lo_ok = (t_eval_min >= t0) if i == 0 else (t_eval_min > t0)
+        hi_ok = np.ones_like(lo_ok) if i == n_seg - 1 else (t_eval_min <= t1)
+        mask = lo_ok & hi_ok
+        if mask.any():
+            Y[:, mask] = sol.sol(t_eval_min[mask])
+        y0 = sol.y[:, -1]
+
+    Y = np.clip(Y, 0.0, None)
+    comp_nM = Y * (1e-6 / V_cell)          # fmol/cell -> nM
+    total_nM = comp_nM.sum(axis=0)
+    return t_eval_h, total_nM, dict(C_ee=comp_nM[0], C_le=comp_nM[1], C_ly=comp_nM[2])
 
 
 def make_params(k_uptake, K_m, k_deg, fixed=None):
@@ -100,35 +157,123 @@ def make_params(k_uptake, K_m, k_deg, fixed=None):
 
 def simulate(p, V_cell, c_ext_um, t_eval_h, t_washout_h=24.0, sim_end_h=50.0):
     """
-    Simulate exposure (0 -> t_washout_h at c_ext_um) then washout
-    (t_washout_h -> sim_end_h at C_ext=0). Returns (t_eval_h, total_nM, compartments_nM).
+    Step-exposure protocol: constant c_ext_um over (0 -> t_washout_h), then washout
+    (t_washout_h -> sim_end_h at C_ext=0). This is the Jarzina calibration protocol
+    and a special case of simulate_profile(); it passes a scalar per segment, so its
+    numerics are identical to the pre-refactor implementation.
+
+    Returns (t_eval_h, total_nM, compartments_nM).
+    """
+    segments = [(0.0, t_washout_h, c_ext_um),
+                (t_washout_h, sim_end_h, 0.0)]
+    return _simulate_segments(p, V_cell, segments, t_eval_h)
+
+
+def simulate_profile(p, V_cell, c_ext_fn, t_eval_h, sim_end_h=None, breakpoints=()):
+    """
+    Simulate an arbitrary time-varying extracellular exposure.
+
+    c_ext_fn   : callable, time in HOURS -> extracellular concentration in uM.
+                 e.g. a PBPK trace wrapped in scipy.interpolate.PchipInterpolator,
+                 or an analytic PK profile.
+    breakpoints: times (h) at which c_ext_fn is discontinuous (dosing events, washout).
+                 Integration is split there so the solver cannot step over the jump.
+                 Smooth profiles need none.
+
+    Nothing about the calibration changes here: k_uptake and k_deg are properties of
+    the cell and drug, not of the exposure profile, so no refit is required.
     """
     t_eval_h = np.atleast_1d(np.asarray(t_eval_h, dtype=float))
-    t_eval_min = t_eval_h * 60.0
-    t_washout_min = t_washout_h * 60.0
-    sim_end_min = sim_end_h * 60.0
+    if sim_end_h is None:
+        sim_end_h = float(t_eval_h.max())
+    edges = [0.0] + sorted(float(b) for b in breakpoints if 0.0 < b < sim_end_h) + [sim_end_h]
+    segments = [(edges[i], edges[i + 1], c_ext_fn) for i in range(len(edges) - 1)]
+    return _simulate_segments(p, V_cell, segments, t_eval_h)
 
-    mask1 = t_eval_min <= t_washout_min
-    mask2 = ~mask1
 
-    sol1 = solve_ivp(odes, (0.0, t_washout_min), [0.0, 0.0, 0.0],
-                      args=(p, c_ext_um), method="BDF", dense_output=True,
-                      rtol=1e-8, atol=1e-12)
-    Y = np.zeros((3, t_eval_min.size))
-    if mask1.any():
-        Y[:, mask1] = sol1.sol(t_eval_min[mask1])
+# ---------------------------------------------------------------------------
+# Analytic extracellular-exposure profiles.
+#
+# Each factory returns a callable C_ext(t) giving concentration in uM for a time
+# (or array of times) in HOURS -- exactly the c_ext_fn contract simulate_profile()
+# expects. The returned callable also carries a `.breakpoints` tuple listing the
+# times (h) where the profile is non-smooth (dose events, infusion stop, washout);
+# pass it straight through as simulate_profile(..., breakpoints=fn.breakpoints) so
+# the stiff BDF solver is forced to evaluate the kink instead of stepping over it.
+# Smooth profiles carry an empty tuple.
+#
+# No refit is needed to use any of these: k_uptake and k_deg are properties of the
+# cell and drug, not of the exposure (see simulate_profile docstring).
+# ---------------------------------------------------------------------------
+def pk_step(C0, t_off_h, t_on_h=0.0):
+    """
+    Square pulse: constant C0 (uM) on [t_on, t_off), zero outside. This is the
+    profile form of the Jarzina step-exposure protocol -- pk_step(C0, t_washout)
+    driven through simulate_profile() reproduces simulate(C0, t_washout_h=...).
+    """
+    C0 = float(C0); t_on = float(t_on_h); t_off = float(t_off_h)
 
-    if mask2.any():
-        sol2 = solve_ivp(odes, (t_washout_min, sim_end_min), sol1.y[:, -1],
-                          args=(p, 0.0), method="BDF", dense_output=True,
-                          rtol=1e-8, atol=1e-12)
-        Y[:, mask2] = sol2.sol(t_eval_min[mask2])
+    def fn(t_h):
+        t = np.asarray(t_h, dtype=float)
+        return np.where((t >= t_on) & (t < t_off), C0, 0.0)
 
-    Y = np.clip(Y, 0.0, None)
-    comp_nM = Y * (1e-6 / V_cell)          # fmol/cell -> nM
-    total_nM = comp_nM.sum(axis=0)
-    compartments = dict(C_ee=comp_nM[0], C_le=comp_nM[1], C_ly=comp_nM[2])
-    return t_eval_h, total_nM, compartments
+    fn.breakpoints = tuple(b for b in (t_on, t_off) if b > 0.0)
+    return fn
+
+
+def pk_bolus(C0, k_e):
+    """
+    IV-bolus exposure: instantaneous rise to C0 (uM) at t=0, then first-order decay
+    at rate k_e (/h):  C_ext(t) = C0 * exp(-k_e * t). Smooth for t > 0, so no
+    breakpoints. AUC over [0, inf) = C0 / k_e; k_e = 0 recovers a constant C0.
+    """
+    C0 = float(C0); k_e = float(k_e)
+
+    def fn(t_h):
+        return C0 * np.exp(-k_e * np.asarray(t_h, dtype=float))
+
+    fn.breakpoints = ()
+    return fn
+
+
+def pk_bolus_train(C0, k_e, tau_h, n_doses):
+    """
+    Repeated IV boluses: dose C0 (uM) every tau_h hours, n_doses times, each decaying
+    at k_e (/h). C_ext is the superposition of the doses given so far. The dose at
+    t=0 sets the initial spike; interior dose times (tau, 2*tau, ...) are breakpoints.
+    """
+    C0 = float(C0); k_e = float(k_e); tau = float(tau_h); n = int(n_doses)
+
+    def fn(t_h):
+        t = np.asarray(t_h, dtype=float)
+        out = np.zeros_like(t)
+        for i in range(n):
+            ti = i * tau
+            out = out + np.where(t >= ti, C0 * np.exp(-k_e * (t - ti)), 0.0)
+        return out
+
+    fn.breakpoints = tuple(i * tau for i in range(1, n))
+    return fn
+
+
+def pk_infusion(C_ss, k_e, t_off_h, t_on_h=0.0):
+    """
+    Zero-order infusion to plateau C_ss (uM), then first-order washout. On
+    [t_on, t_off]:  C = C_ss * (1 - exp(-k_e * (t - t_on))). After t_off it decays
+    from the value reached at t_off at rate k_e (/h). Breakpoints at t_off (and t_on
+    if positive) -- the infusion-stop kink is exactly where the solver must not skip.
+    """
+    C_ss = float(C_ss); k_e = float(k_e); t_on = float(t_on_h); t_off = float(t_off_h)
+    c_off = C_ss * (1.0 - np.exp(-k_e * (t_off - t_on)))
+
+    def fn(t_h):
+        t = np.asarray(t_h, dtype=float)
+        rising = C_ss * (1.0 - np.exp(-k_e * np.clip(t - t_on, 0.0, None)))
+        decaying = c_off * np.exp(-k_e * np.clip(t - t_off, 0.0, None))
+        return np.where(t < t_on, 0.0, np.where(t <= t_off, rising, decaying))
+
+    fn.breakpoints = tuple(b for b in (t_on, t_off) if b > 0.0)
+    return fn
 
 
 def first_crossing_h(t, y, thr):

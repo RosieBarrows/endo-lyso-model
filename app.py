@@ -29,6 +29,44 @@ CELL_LINES = list(mc.V_CELL.keys())
 KUPTAKE_KEY = {"RPTEC/TERT1": "k_uptake_RPTEC", "NRK-52E": "k_uptake_NRK"}
 DATA_CENTRAL = {"RPTEC/TERT1": mc.RPTEC_CENTRAL, "NRK-52E": mc.NRK_CENTRAL}
 
+# Exposure-protocol / PK-profile menu labels (kept as constants so the sidebar
+# widgets, session-state defaults, and downstream branching can't drift apart).
+EXPOSURE_CONST = "Constant + washout (in vitro protocol)"
+EXPOSURE_PROFILE = "Time-varying (analytic PK profile)"
+PROFILE_BOLUS = "IV bolus (single, decaying)"
+PROFILE_TRAIN = "Repeated IV boluses"
+PROFILE_INFUSION = "Infusion then washout"
+
+
+def build_exposure(spec):
+    """
+    Turn a hashable exposure `spec` tuple into (c_ext_fn, breakpoints) for
+    simulate_profile(). spec[0] selects the model_core_v04 profile factory:
+      ("bolus",    C0,   k_e)                 -> pk_bolus
+      ("train",    C0,   k_e, tau_h, n)       -> pk_bolus_train
+      ("infusion", C_ss, k_e, t_off_h)        -> pk_infusion
+    Keeping it a tuple (not a lambda) is what lets run_sim stay @st.cache_data'd.
+    """
+    kind = spec[0]
+    if kind == "bolus":
+        fn = mc.pk_bolus(spec[1], spec[2])
+    elif kind == "train":
+        fn = mc.pk_bolus_train(spec[1], spec[2], spec[3], spec[4])
+    elif kind == "infusion":
+        fn = mc.pk_infusion(spec[1], spec[2], spec[3])
+    else:
+        raise ValueError(f"unknown exposure kind: {kind!r}")
+    return fn, fn.breakpoints
+
+
+def add_cext_overlay(fig, t_grid, cext):
+    """Draw the driving extracellular exposure C_ext(t) on a right-hand axis."""
+    fig.add_trace(go.Scatter(x=t_grid, y=cext, mode="lines", name="C_ext(t)",
+                             line=dict(color="crimson", width=1.5, dash="dot"),
+                             yaxis="y2"))
+    fig.update_layout(yaxis2=dict(title="C_ext (uM)", overlaying="y", side="right",
+                                  showgrid=False, rangemode="tozero"))
+
 # ---------------------------------------------------------------------------
 # Default state + reset handling
 # ---------------------------------------------------------------------------
@@ -38,6 +76,12 @@ DEFAULTS = {
     "use_mm": True,
     "K_m": mc.KM_DEFAULT,
     "dose": 34.0,
+    "exposure_mode": EXPOSURE_CONST,
+    "profile_type": PROFILE_BOLUS,
+    "pk_thalf": 8.0,
+    "dose_interval": 12.0,
+    "n_doses": 4,
+    "infusion_off": 24.0,
     "k_mat": mc.FIXED_DEFAULT["k_mat"],
     "k_rec": mc.FIXED_DEFAULT["k_rec"],
     "k_fuse": mc.FIXED_DEFAULT["k_fuse"],
@@ -54,6 +98,25 @@ for _key, _val in DEFAULTS.items():
 
 def reset_to_defaults():
     for key, val in DEFAULTS.items():
+        st.session_state[key] = val
+
+
+# Representative polymyxin B plasma exposure (see the About tab). Total plasma Cmax
+# is ~5-8 mg/L; at MW ~1200 g/mol that is ~4-7 uM total. Polymyxin B is ~50-60%
+# protein-bound, and it is the UNBOUND drug that drives the filtered load presented
+# to the proximal tubule, so the preset uses ~3 uM (unbound Cmax). Terminal half-life
+# is ~9-12 h; 10 h is the default. These set a time-varying IV bolus, in contrast to
+# the 34 uM constant in vitro calibration dose.
+INVIVO_PRESET = {
+    "exposure_mode": EXPOSURE_PROFILE,
+    "profile_type": PROFILE_BOLUS,
+    "dose": 3.0,
+    "pk_thalf": 10.0,
+}
+
+
+def load_invivo_preset():
+    for key, val in INVIVO_PRESET.items():
         st.session_state[key] = val
 
 
@@ -89,11 +152,60 @@ if use_mm:
 else:
     K_m = 1e9  # effectively linear
 
-dose = st.sidebar.slider(
-    "Extracellular dose, C_ext (uM)",
-    min_value=34.0, max_value=2000.0, step=1.0, key="dose",
-    help="Continuous extracellular drug concentration.",
+st.sidebar.markdown("**Exposure protocol**")
+exposure_mode = st.sidebar.radio(
+    "Extracellular exposure C_ext(t)",
+    [EXPOSURE_CONST, EXPOSURE_PROFILE],
+    key="exposure_mode",
+    help="Constant = the in vitro protocol: a fixed medium concentration for the "
+         "exposure window, then washout to zero (what Jarzina et al. did, and what "
+         "k_uptake/k_deg were calibrated on). Time-varying = drive the SAME calibrated "
+         "cell with an analytic pharmacokinetic profile whose concentration rises and "
+         "falls, as drug would in vivo. No refit: k_uptake and k_deg are properties of "
+         "the cell and drug, not of the exposure shape.",
 )
+is_profile = exposure_mode == EXPOSURE_PROFILE
+
+st.sidebar.button(
+    "Load in vivo plasma preset (polymyxin B)",
+    on_click=load_invivo_preset, use_container_width=True,
+    help="Approximate polymyxin B plasma exposure: a time-varying IV bolus peaking at "
+         "~3 uM (unbound Cmax; total plasma ~2x higher) with a terminal half-life of "
+         "~10 h. Unbound drug drives the filtered load reaching the tubule. Contrast "
+         "with the 34 uM constant in vitro calibration dose.",
+)
+
+dose = st.sidebar.slider(
+    "Peak / plateau C_ext (uM)" if is_profile else "Extracellular dose, C_ext (uM)",
+    min_value=0.5, max_value=2000.0, step=0.5, key="dose",
+    help="Constant mode: the fixed medium concentration. Time-varying mode: the "
+         "amplitude of the profile — the bolus peak, or the infusion plateau target. "
+         "The 34 uM default is the Jarzina calibration dose; realistic in vivo "
+         "polymyxin B plasma peaks are far lower (~2-7 uM total, ~1-3 uM unbound).",
+)
+
+if is_profile:
+    profile_type = st.sidebar.selectbox(
+        "PK profile shape", [PROFILE_BOLUS, PROFILE_TRAIN, PROFILE_INFUSION],
+        key="profile_type",
+        help="Bolus: instantaneous spike, then first-order decay. Repeated boluses: the "
+             "same spike redosed at a fixed interval (superposed). Infusion: zero-order "
+             "rise towards a plateau, then washout after the infusion stops.",
+    )
+    pk_thalf = st.sidebar.slider(
+        "Exposure half-life, t½ (h)", 0.5, 48.0, step=0.5, key="pk_thalf",
+        help="Elimination half-life of the extracellular profile; k_e = ln2 / t½. For a "
+             "fixed peak, a shorter t½ means a briefer exposure (smaller AUC).",
+    )
+    if profile_type == PROFILE_TRAIN:
+        dose_interval = st.sidebar.slider("Dosing interval (h)", 2.0, 48.0, step=1.0,
+                                          key="dose_interval")
+        n_doses = st.sidebar.slider("Number of doses", 1, 10, step=1, key="n_doses")
+    elif profile_type == PROFILE_INFUSION:
+        infusion_off = st.sidebar.slider("Infusion stop time (h)", 1.0, 48.0, step=1.0,
+                                         key="infusion_off")
+else:
+    profile_type = None
 
 st.sidebar.markdown("---")
 st.sidebar.markdown("**Trafficking rate constants (/min)**")
@@ -119,8 +231,14 @@ k_esc = st.sidebar.slider("k_esc (LE -> cytosol escape)", 0.00002, 0.002,
                                 "central to the planned ON endosomal-escape/efficacy extension.")
 
 st.sidebar.markdown("---")
-t_washout = st.sidebar.slider("Washout time (h)", 6.0, 48.0, step=1.0, key="t_washout")
-sim_end = st.sidebar.slider("Simulation end (h)", t_washout + 2, 96.0, step=2.0, key="sim_end")
+if not is_profile:
+    t_washout = st.sidebar.slider("Washout time (h)", 6.0, 48.0, step=1.0, key="t_washout")
+    sim_min = t_washout + 2
+else:
+    # Washout is a constant-mode concept; keep the last value for the sweep tab.
+    t_washout = st.session_state.get("t_washout", DEFAULTS["t_washout"])
+    sim_min = 6.0
+sim_end = st.sidebar.slider("Simulation end (h)", sim_min, 96.0, step=2.0, key="sim_end")
 
 fixed = dict(k_mat=k_mat, k_rec=k_rec, k_fuse=k_fuse, k_esc=k_esc)
 if cell_line == "NRK-52E" and nrk_kdeg_free:
@@ -140,21 +258,49 @@ st.sidebar.caption(
 )
 
 # ---------------------------------------------------------------------------
+# Resolve the sidebar controls into a hashable exposure spec + display strings.
+# ---------------------------------------------------------------------------
+if is_profile:
+    k_e = np.log(2.0) / pk_thalf              # /h elimination rate from half-life
+    if profile_type == PROFILE_BOLUS:
+        exposure_spec = ("bolus", float(dose), k_e)
+        exposure_title = f"IV bolus, peak {dose:.0f} uM, t½ {pk_thalf:.0f} h"
+    elif profile_type == PROFILE_TRAIN:
+        exposure_spec = ("train", float(dose), k_e, float(dose_interval), int(n_doses))
+        exposure_title = (f"{int(n_doses)}× {dose:.0f} uM bolus q{dose_interval:.0f}h, "
+                          f"t½ {pk_thalf:.0f} h")
+    else:  # PROFILE_INFUSION
+        exposure_spec = ("infusion", float(dose), k_e, float(infusion_off))
+        exposure_title = (f"infusion → {dose:.0f} uM, stop {infusion_off:.0f} h, "
+                          f"t½ {pk_thalf:.0f} h")
+else:
+    exposure_spec = ("const", float(dose), float(t_washout))
+    exposure_title = f"{dose:.0f} uM constant, washout {t_washout:.0f} h"
+
+# ---------------------------------------------------------------------------
 # Cached simulation wrapper
 # ---------------------------------------------------------------------------
 @st.cache_data(show_spinner=False)
-def run_sim(k_uptake, K_m, k_deg, fixed_tuple, V_cell, dose, t_washout, sim_end, n=400):
+def run_sim(k_uptake, K_m, k_deg, fixed_tuple, V_cell, exposure_spec, sim_end, n=400):
     fixed_dict = dict(fixed_tuple)
     p = mc.make_params(k_uptake, K_m, k_deg, fixed=fixed_dict)
     t_grid = np.linspace(0.0, sim_end, n)
-    t, tot, comps = mc.simulate(p, V_cell, dose, t_grid,
-                                 t_washout_h=t_washout, sim_end_h=sim_end)
-    return t, tot, comps
+    if exposure_spec[0] == "const":
+        _, dose_c, t_wash = exposure_spec
+        t, tot, comps = mc.simulate(p, V_cell, dose_c, t_grid,
+                                     t_washout_h=t_wash, sim_end_h=sim_end)
+        cext = np.where(t_grid < t_wash, dose_c, 0.0)
+    else:
+        fn, bpts = build_exposure(exposure_spec)
+        t, tot, comps = mc.simulate_profile(p, V_cell, fn, t_grid,
+                                            sim_end_h=sim_end, breakpoints=bpts)
+        cext = np.asarray(fn(t_grid), dtype=float)
+    return t, tot, comps, cext
 
 
 fixed_tuple = tuple(sorted(fixed.items()))
-t_grid, total_nM, comps = run_sim(k_uptake, K_m, k_deg, fixed_tuple, V_cell,
-                                   dose, t_washout, sim_end)
+t_grid, total_nM, comps, cext_trace = run_sim(k_uptake, K_m, k_deg, fixed_tuple,
+                                              V_cell, exposure_spec, sim_end)
 
 # ---------------------------------------------------------------------------
 # Header
@@ -252,16 +398,29 @@ back to the cell surface, and a small fraction of late-endosome content
 \quad\xrightarrow[C_{ext}\ll K_m]{}\quad k_{uptake}\, C_{ext}
 """)
     st.markdown("""
-| Symbol | Meaning | Units |
-|---|---|---|
-| `C_ee`, `C_le`, `C_ly` | drug amount in early endosome / late endosome / lysosome | fmol per cell |
-| `C_ext` | extracellular drug concentration (the dose) | µM |
-| `k_uptake` / `V_max`, `K_m` | rate (or saturating rate) at which drug is taken up from the medium | fmol/cell/min (per µM) |
-| `k_mat` | rate early endosomes mature into late endosomes | /min |
-| `k_rec` | rate early-endosome content is recycled back to the surface | /min |
-| `k_fuse` | rate late endosomes fuse with lysosomes | /min |
-| `k_esc` | rate late-endosome content escapes to the cytosol | /min |
-| `k_deg` | rate drug is degraded/cleared once in the lysosome | /min |
+The two forms are tied together through the calibration. `k_uptake` is fitted in
+the linear regime against the single 34 µM dataset, so `V_max` is back-calculated
+to reproduce that fitted uptake **at the 34 µM calibration dose**:
+`V_max = k_uptake·(K_m + 34)`. This anchors the model to the data at 34 µM for
+*any* K_m — the saturating and linear curves coincide exactly at the calibration
+dose, and K_m only reshapes the response at higher concentrations. (Anchoring
+instead with `V_max = k_uptake·K_m` pins the C_ext→0 tangent, which leaves the
+saturating curve sitting ~15% below the data at K_m=200 µM, because 34 µM is not
+much smaller than K_m.)
+""")
+    st.markdown("""
+| Symbol | Meaning | Units | Default (v0.4) | Source |
+|---|---|---|---|---|
+| `C_ee`, `C_le`, `C_ly` | drug amount in early / late endosome / lysosome | fmol/cell | state variables (start at 0) | — |
+| `C_ext` | extracellular concentration (the exposure) | µM | 34 (calibration dose); set in sidebar | Jarzina et al. 2022 |
+| `K_m` | half-saturation concentration for uptake | µM | 200 | chosen mid-range; swept 20–1000 |
+| `k_uptake` (→ `V_max`) | linear uptake rate (`V_max = k_uptake·(K_m+34)`) | fmol/cell/min/µM | RPTEC 2.6×10⁻⁷; NRK 3.4×10⁻⁸ | **fitted** to Jarzina et al. 2022 |
+| `k_mat` | early → late endosome maturation | /min | 0.048 (t½ ≈ 14 min) | Shipman et al. 2022 (k_m,1) |
+| `k_rec` | early-endosome recycling to surface | /min | 0.02, band 0.02–0.046 (t½ ≈ 35–15 min) | Shipman et al. 2022 (k_DAT,f = upper bound) |
+| `k_fuse` | late endosome → lysosome fusion | /min | 0.0094 (t½ ≈ 74 min) | Shipman et al. 2022 (k_m,2) |
+| `k_esc` | late-endosome escape to cytosol | /min | 0.0002 (t½ ≈ 58 h) | Gilleron et al. 2013 (~1% escape) |
+| `k_deg` | lysosomal degradation / clearance | /min | 2.4×10⁻⁴ (t½ ≈ 47 h); NRK-free 1.6×10⁻³ (t½ ≈ 7 h) | **fitted** to Jarzina et al. 2022 |
+| `V_cell` | cell volume (converts fmol/cell → nM) | L | RPTEC 1.99×10⁻¹²; NRK 1.21×10⁻¹² | cell diameter (≈15.6 / 13.2 µm) |
 
 Model amounts (fmol/cell) are converted to the intracellular concentrations
 (nM) shown in the charts using each cell line's measured cell volume. As of
@@ -284,6 +443,88 @@ degradation and reproduces the steep post-washout decline the shared-`k_deg`
 fit misses.
 """)
 
+    st.markdown("### Where the default values come from")
+    st.markdown("""
+The defaults fall into three groups by how firmly they are pinned:
+
+**Directly measured (trafficking machinery).** `k_mat`, `k_fuse` and the upper
+bound of `k_rec` are the proximal-tubule-specific rates measured by Shipman et
+al. (2022) in opossum-kidney cells, reported as percent-per-minute and converted
+to /min (×0.01): k_m,1 = 4.8 → `k_mat` 0.048 (t½ ≈ 14 min), k_m,2 = 0.936 →
+`k_fuse` 0.0094 (t½ ≈ 74 min), k_DAT,f = 4.61 → `k_rec` upper 0.046. This is the
+closest available measured trafficking kinetics for the megalin pathway. `k_rec`
+is treated as a **0.02–0.046 band** (nominal 0.02) rather than a point value
+because surface recycling is cargo-dependent and Shipman's figure is an upper
+bound for our lumped early-endosome→surface flux.
+
+**Borrowed by analogy (`k_esc`).** There is no measured escape rate for megalin
+cargo, so `k_esc` is held at the small value implied by Gilleron et al. (2013),
+where ~1% of endosomal cargo reaches the cytosol. Its t½ (~58 h) is far slower
+than fusion, so it is negligible for accumulation — it is kept in the model as
+the hook for a future endosomal-escape / efficacy extension, not because it
+shapes the current curves.
+
+**Fitted to data (`k_uptake`, `k_deg`).** These are *not* assumed — they are
+least-squares fitted to the Jarzina et al. (2022) 34 µM time course, separately
+per cell line. The fitted lysosomal degradation half-life (`k_deg` t½ ≈ 47 h) is
+what reproduces the slow post-washout decline in RPTEC; the NRK *k_deg*-free
+option (t½ ≈ 7 h) is what captures NRK's much steeper decline. `K_m` has no
+direct measurement here, so 200 µM is a deliberate mid-range default and is swept
+(20–1000 µM) to show where uptake saturation sets in.
+
+**Exposure timescale (the PK profile defaults).** The time-varying profiles are
+parameterised by an elimination half-life t½ (k_e = ln2 / t½). The 10 h default,
+and the in vivo preset, reflect polymyxin B's reported terminal plasma half-life
+of roughly **9–12 h** in patients; the preset's ~3 µM peak is the unbound plasma
+Cmax (see the exposure section above).
+""")
+
+    st.markdown("### Constant vs time-varying exposure")
+    st.markdown("""
+The calibration experiment held the medium concentration **constant** for 24 h
+and then washed it out. In a patient, drug concentration in the blood — and
+therefore around the kidney cell — instead **rises and falls** after each dose.
+The **Exposure protocol** control in the sidebar lets you swap the constant
+exposure for an analytic **pharmacokinetic (PK) profile**:
+
+- **IV bolus** — an instantaneous spike to the chosen peak, then first-order
+  decay set by an elimination half-life t½.
+- **Repeated IV boluses** — the same spike redosed at a fixed interval, with
+  the doses superposed (accumulation between doses is captured automatically).
+- **Infusion then washout** — a zero-order rise toward a plateau, then decay
+  once the infusion stops.
+
+Crucially, **no re-fitting is involved**. `k_uptake` and `k_deg` describe the
+cell and the drug, not the shape of the exposure, so the *same* calibrated model
+is simply driven by a different `C_ext(t)`. When a time-varying profile is
+active, its `C_ext(t)` is drawn as a **red dotted line on a right-hand axis** on
+the Time course and Lysosomal load tabs, so you can see the exposure that is
+driving the intracellular response.
+
+Why this matters mechanistically: the lysosome **integrates** exposure. Two
+profiles with the *same* area under the concentration curve (AUC) but different
+shapes — a tall brief spike vs. a low sustained level — reach a similar eventual
+lysosomal load, but the **peak** lysosomal concentration, and *when* it is
+reached, depend on the exposure shape, not on AUC alone. That distinction is
+exactly what a single constant-exposure experiment cannot reveal, and it is the
+first step toward driving this intracellular model with a realistic (e.g.
+PBPK-derived) exposure in the wider multi-scale model.
+
+**In vivo context.** The 34 µM calibration dose is an *in vitro* concentration,
+far above what circulates in a patient. Reported polymyxin B plasma exposures
+are roughly a steady-state average of 2–4 mg/L and a peak (Cmax) of ~5–8 mg/L;
+at a molecular weight of ~1200 g/mol that is only about **2–7 µM total**, and
+roughly **half that unbound** (polymyxin B is ~50–60% protein-bound). Because it
+is the unbound drug that drives the filtered load presented to the proximal
+tubule, the sidebar's **"Load in vivo plasma preset"** button sets a
+representative time-varying exposure on the *unbound* scale — a ~3 µM IV bolus
+with a ~10 h terminal half-life — so you can see how much lysosomal load a
+realistic systemic exposure would drive, versus the deliberately high calibration
+dose. Note this is the concentration *presented to* the cell (plasma-derived
+filtered load); the marked renal-cortical accumulation of polymyxin B is what the
+model then *predicts*, not an input.
+""")
+
     st.markdown("### Why it matters")
     st.markdown("""
 Polymyxin- and aminoglycoside-induced kidney injury is described by an
@@ -296,6 +537,24 @@ early kidney injury risk, rather than relying only on an empirical
 dose-toxicity correlation. The **Dose-response sweep** tab is the most
 directly translational output: it shows how long it takes lysosomal drug
 load to cross a candidate "harmful" threshold, across a range of doses.
+""")
+
+    st.markdown("### References")
+    st.markdown("""
+- **Jarzina et al. (2022).** *Frontiers in Toxicology* 4:864441. — Calibration
+  dataset: intracellular polymyxin B uptake in RPTEC/TERT1 and NRK-52E (Fig 6A).
+- **Shipman KE, Long KR, Cowan IA, Rbaibi Y, Baty CJ, Weisz OA (2022).** *An
+  Adaptable Physiological Model of Endocytic Megalin Trafficking in Opossum
+  Kidney Cells and Mouse Kidney Proximal Tubule.* FUNCTION 3(6):zqac046.
+  doi:10.1093/function/zqac046. — Source of `k_mat`, `k_fuse`, and the `k_rec`
+  upper bound (comprehensive OK-cell model, Fig 4C).
+- **Gilleron et al. (2013).** *Nature Biotechnology* 31:638–646. — Basis for the
+  ~1% endosomal-escape scale used to set `k_esc`.
+
+Polymyxin B plasma pharmacokinetics (Cmax, terminal half-life, protein binding)
+used for the in vivo preset are drawn from the clinical population-PK literature
+(e.g. Sandri et al. 2013, *Clinical Infectious Diseases*); confirm against the
+primary source before citing specific numbers.
 """)
 
 # ---------------------------------------------------------------------------
@@ -314,13 +573,18 @@ with tab1:
         "balance should shift from endosomes towards lysosome-dominance as exposure "
         "continues, then decline everywhere once the drug is washed out."
     )
+    st.caption(f"**Exposure:** {exposure_title}."
+               + ("  The driving C_ext(t) is the red dotted line (right-hand axis)."
+                  if is_profile else
+                  "  The dashed grey line marks washout."))
     col1, col2 = st.columns(2)
 
     with col1:
         fig = go.Figure()
         fig.add_trace(go.Scatter(x=t_grid, y=total_nM, mode="lines",
                                   name="model (total)", line=dict(width=3)))
-        if dose == mc.CAL_CONC:
+        show_data = (not is_profile) and dose == mc.CAL_CONC
+        if show_data:
             ydata = DATA_CENTRAL[cell_line]
             if cell_line == "RPTEC/TERT1":
                 err_lo = mc.RPTEC_CENTRAL - mc.RPTEC_LOWER
@@ -333,14 +597,17 @@ with tab1:
                 fig.add_trace(go.Scatter(x=mc.T_ALL_H, y=ydata, mode="markers",
                                           name="data (Jarzina 2022)",
                                           marker=dict(size=9, color="black")))
-        fig.add_vline(x=t_washout, line_dash="dash", line_color="grey",
-                      annotation_text="washout")
-        fig.update_layout(title=f"{cell_line} @ {dose:.0f} uM — total intracellular",
+        if is_profile:
+            add_cext_overlay(fig, t_grid, cext_trace)
+        else:
+            fig.add_vline(x=t_washout, line_dash="dash", line_color="grey",
+                          annotation_text="washout")
+        fig.update_layout(title=f"{cell_line} — total intracellular",
                            xaxis_title="time (h)", yaxis_title="intracellular conc (nM)",
                            height=450)
         st.plotly_chart(fig, use_container_width=True)
-        if dose != mc.CAL_CONC:
-            st.caption("Calibration data is only shown at the 34 uM calibration dose.")
+        if (not is_profile) and dose != mc.CAL_CONC:
+            st.caption("Calibration data is only shown at the 34 uM constant calibration dose.")
 
     with col2:
         fig2 = go.Figure()
@@ -348,8 +615,11 @@ with tab1:
             fig2.add_trace(go.Scatter(x=t_grid, y=comps[name], mode="lines",
                                        stackgroup="one", name=name,
                                        line=dict(color=color)))
-        fig2.add_vline(x=t_washout, line_dash="dash", line_color="grey")
-        fig2.update_layout(title=f"{cell_line} @ {dose:.0f} uM — compartment breakdown",
+        if is_profile:
+            add_cext_overlay(fig2, t_grid, cext_trace)
+        else:
+            fig2.add_vline(x=t_washout, line_dash="dash", line_color="grey")
+        fig2.update_layout(title=f"{cell_line} — compartment breakdown",
                             xaxis_title="time (h)", yaxis_title="intracellular conc (nM)",
                             height=450)
         st.plotly_chart(fig2, use_container_width=True)
@@ -380,11 +650,19 @@ with tab2:
     )
     thresholds = st.multiselect("Threshold levels (nM)", [250, 500, 1000, 2000, 3000],
                                  key="thresholds")
+    st.caption(f"**Exposure:** {exposure_title}."
+               + ("  The driving C_ext(t) is the red dotted line (right-hand axis)."
+                  if is_profile else
+                  "  The dashed grey line marks washout."))
     cly = comps["C_ly"]
     fig3 = go.Figure()
     fig3.add_trace(go.Scatter(x=t_grid, y=cly, mode="lines", name="C_ly",
                                line=dict(color="#238b45", width=3)))
-    fig3.add_vline(x=t_washout, line_dash="dash", line_color="grey", annotation_text="washout")
+    if is_profile:
+        add_cext_overlay(fig3, t_grid, cext_trace)
+    else:
+        fig3.add_vline(x=t_washout, line_dash="dash", line_color="grey",
+                       annotation_text="washout")
 
     rows = []
     for thr in thresholds:
@@ -397,7 +675,7 @@ with tab2:
                                        marker=dict(color="red", size=10, symbol="triangle-down"),
                                        text=[f"{tc:.1f}h"], textposition="top right",
                                        showlegend=False))
-    fig3.update_layout(title=f"{cell_line} @ {dose:.0f} uM — lysosomal load",
+    fig3.update_layout(title=f"{cell_line} — lysosomal load",
                         xaxis_title="time (h)", yaxis_title="lysosomal conc, C_ly (nM)",
                         height=500)
     st.plotly_chart(fig3, use_container_width=True)
@@ -422,6 +700,13 @@ with tab3:
         "dose — the kind of dose/exposure-vs-risk relationship a safety assessment "
         "would actually want."
     )
+    if is_profile:
+        st.info(
+            "This sweep is a **constant-exposure** analysis — it holds each dose fixed "
+            "for the exposure window, so it is independent of the time-varying profile "
+            "selected in the sidebar. The Time course and Lysosomal load tabs reflect "
+            "that profile; this tab always sweeps constant doses."
+        )
     doses = [34.0, 62.5, 125.0, 250.0, 500.0, 1000.0, 2000.0]
 
     @st.cache_data(show_spinner=False)
