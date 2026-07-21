@@ -1,0 +1,14 @@
+# Jarzina et al. (2022) Front. Toxicol. 4:864441, Fig 5 -- KE3 viability, NRK-52E.
+# HAND-DIGITISED FROM THE FIGURE, PROVISIONAL. Units = % of control; sd = symmetric linear +/-SD.
+# Discrete measured points only -- never Jarzina's own fitted curves.
+# NOTE: the lowest viability reached in range is 23% at 1000 uM -- this curve does NOT
+# reach its floor within the tested range, which is why the NRK fit frees the bottom
+# asymptote (constrained to [0, 20]) instead of fixing it at 0 as the RPTEC fit does.
+# 500: slope anchor.
+concentration_uM,mean,sd
+15.6,95.5,3.0
+62.5,91.7,3.0
+125.0,91.5,3.0
+250.0,77.9,2.2
+500.0,54.0,4.7
+1000.0,23.0,7.7

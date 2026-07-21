@@ -10,8 +10,9 @@ venv/
 # OS / editor
 .DS_Store
 
-# Claude Code local settings (keep local, not shared)
+# Claude Code local settings / notes (keep local, not shared)
 .claude/settings.local.json
+CLAUDE.local.md
 
 # Generated figures (all scripts write under figures/)
 figures/

@@ -1,0 +1,13 @@
+# Jarzina et al. (2022) Front. Toxicol. 4:864441, Fig 5 -- KE3 viability, RPTEC/TERT1.
+# HAND-DIGITISED FROM THE FIGURE, PROVISIONAL. Units = % of control; sd = symmetric linear +/-SD.
+# Discrete measured points only -- never Jarzina's own fitted curves.
+# 31.25: upper cap buried in cluster, SD taken from lower cap -- treat as wide.
+# 62.5 : slope anchor, both caps clean.
+# 500/1000: digitised -0.2, clamped to 0 (viability is bounded [0, 100]).
+concentration_uM,mean,sd
+31.25,91.0,7.4
+62.5,40.0,2.9
+125.0,5.8,2.5
+250.0,0.8,1.0
+500.0,0.0,1.0
+1000.0,0.0,1.0

@@ -5,10 +5,9 @@ Mirror of model_core.py but with the v0.4 Shipman et al. (2022) trafficking rate
 constants and the v0.4 refit results. Kept as a separate module so the v0.2/v0.3
 backend (model_core.py) stays intact for comparison.
 
-NOTE: app.py currently imports model_core (the v0.3 backend) and is deliberately
-NOT rewired to this module yet -- per instruction, the Streamlit app is left
-unchanged in this version. This file exists to (a) record the canonical v0.4
-fitted constants and (b) make the eventual app switch a one-line import change.
+This module is the live backend: app.py and the v0.4 analysis scripts import it,
+and it holds the canonical frozen v0.4 fitted constants. model_core.py is the
+retained v0.3 backend, kept for version-to-version comparison only.
 
 v0.4 change (prompts/model_v04_updated_instructions.md): fixed trafficking rates
 updated to proximal-tubule-specific values from Shipman et al. (2022), a
