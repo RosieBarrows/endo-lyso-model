@@ -17,5 +17,8 @@ CLAUDE.local.md
 # Generated figures (all scripts write under figures/)
 figures/
 
+# System schematic (kept locally as an asset, not versioned here)
+endo-lyso.png
+
 # Write-ups (kept in Dropbox, not versioned here)
-*.docx
+logbook/
